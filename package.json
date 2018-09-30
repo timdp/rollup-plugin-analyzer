@@ -5,6 +5,7 @@
   "main": "index.js",
   "module": "module.js",
   "files": [
+    "lib/",
     "index.js",
     "module.js"
   ],
@@ -48,5 +49,9 @@
     "rollup55": "npm:rollup@0.55.x",
     "rollup60": "npm:rollup@0.60.x"
   },
-  "dependencies": {}
+  "dependencies": {
+    "mem": "^4.0.0",
+    "mkdirp": "^0.5.1",
+    "read-pkg-up": "^4.0.0"
+  }
 }
