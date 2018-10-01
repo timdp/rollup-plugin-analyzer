@@ -18,6 +18,9 @@ const getPackage = mem(cwd => {
     return null
   } else {
     info.path = path.dirname(info.path);
+    try {
+      info.path = fs.realpathSync(info.path);
+    } catch (_) {}
     return info
   }
 });
@@ -38,32 +41,47 @@ html, body, #container {
 </head>
 <body>
 <div id="container"></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/4.13.0/d3.min.js"></script>
 <script src="https://unpkg.com/sunburst-chart"></script>
 <script>
-var scheme = d3.scaleOrdinal(d3.schemeCategory20)
+(function () {
+var colors = Object.create(null)
+var min = 96
+var max = 256
+
+function color (path) {
+  if (colors[path] == null) {
+    var m1 = Math.random()
+    var m2 = Math.random()
+    if (m1 > m2) {
+      var temp = m1
+      m1 = m2
+      m2 = temp
+    }
+    var r = Math.min(255, min + Math.floor((max - min) * m1))
+    var g = Math.min(255, min + Math.floor((max - min) * (m2 - m1)))
+    var b = Math.min(255, min + Math.floor((max - min) * (1 - m2)))
+    colors[path] = 'rgb(' + r + ',' + g + ',' + b + ')'
+  }
+  return colors[path]
+}
+
 Sunburst()
   .color(function (d) {
-    return scheme(d.name)
+    return color(d.path)
   })
   .tooltipContent(function (d, node) {
     return node.value + ' bytes'
   })
   .data(${JSON.stringify(data, null, 2)})(
     document.getElementById('container'))
+})()
 </script>
 </body>
 </html>`;
 
 const normalizeId = id => id.replace(rePrefix, '');
 
-const buildPackageNode = (pkgName, moduleIds, ctx) => {
-  const {
-    dependencies,
-    sizes,
-    moduleToPackageInfo,
-    packagePathToModules
-  } = ctx;
+const setUpQueue = ({ dependencies, moduleToPackageInfo }) => {
   const queue = [];
   const seen = Object.create(null);
   const enqueue = ids => {
@@ -74,48 +92,66 @@ const buildPackageNode = (pkgName, moduleIds, ctx) => {
       }
       for (const id of dependencyIds) {
         const info = moduleToPackageInfo[id];
-        console.log('info', id, info);
         if (info != null && info.pkg != null && !seen[info.path]) {
           seen[info.path] = true;
-          console.log('enqueue', info.path);
           queue.push(info);
         }
       }
     }
   };
-  console.log('modules', moduleIds);
+  return {
+    queue,
+    enqueue
+  }
+};
+
+const buildPackageNode = (dependentPkg, moduleIds, ctx, ancestors = []) => {
+  const {
+    sizes,
+    moduleToPackageInfo,
+    packagePathToModules
+  } = ctx;
+  const { queue, enqueue } = setUpQueue(ctx);
   enqueue(moduleIds);
-  const pkgInfos = [];
+  const dependencyPkgs = [];
   while (queue.length > 0) {
-    const pkgInfo = queue.shift();
-    if (pkgInfo.pkg.name !== pkgName) {
-      pkgInfos.push(pkgInfo);
-    } else {
-      const moduleIds = packagePathToModules[pkgInfo.path];
+    const dependencyPkg = queue.shift();
+    if (dependencyPkg.path === dependentPkg.path) {
+      const moduleIds = packagePathToModules[dependencyPkg.path];
       if (moduleIds != null) {
         enqueue(moduleIds);
       }
+    } else if (!ancestors.includes(dependencyPkg.path) &&
+        !dependencyPkgs.some(pkg => pkg.path === dependencyPkg.path)) {
+      dependencyPkgs.push(dependencyPkg);
     }
   }
-  const pkgs = [];
-  for (const pkgInfo of pkgInfos) {
-    if (!pkgs.some(info => pkgInfo.path === info.path)) {
-      pkgs.push(pkgInfo);
-    }
-  }
-  console.log('pkgs', pkgs);
-  const children = pkgs.length > 0
-    ? pkgs.map(({ pkg, path: pkgPath }) =>
-      buildPackageNode(pkg.name, packagePathToModules[pkgPath] || [], ctx))
-    : moduleIds.map(id => ({
-      name: moduleToPackageInfo[id] != null
-        ? path.relative(moduleToPackageInfo[id].path, id)
-        : id,
-      value: sizes[id]
-    }));
+  const children = dependencyPkgs.length > 0
+    ? dependencyPkgs.map(pkg => buildPackageNode(
+      pkg,
+      packagePathToModules[pkg.path] || [],
+      ctx,
+      [...ancestors, pkg.path]
+    ))
+    : moduleIds.map(id => {
+      const size = sizes[id];
+      let realId = id;
+      try {
+        realId = fs.realpathSync(realId);
+      } catch (_) {}
+      const name = moduleToPackageInfo[id] != null
+        ? path.relative(moduleToPackageInfo[id].path, realId)
+        : realId;
+      return {
+        name: name !== '' ? name : '(empty)',
+        value: size,
+        path: realId
+      }
+    });
   return {
-    name: pkgName,
-    children
+    name: dependentPkg.pkg.name,
+    children,
+    path: dependentPkg.path
   }
 };
 
@@ -134,19 +170,17 @@ const getDependenciesAndSizes = modules => {
   return { dependencies, sizes }
 };
 
-const getModuleToPackageInfo = (dependencies, rootPackagePath) => {
+const getModuleToPackageInfo = (dependencies, rootPackage) => {
   const moduleToPackageInfo = Object.create(null);
   const dependentNames = Object.keys(dependencies);
   for (const dependent of dependentNames) {
-    for (let id of [dependent, ...dependencies[dependent]]) {
+    for (const id of [dependent, ...dependencies[dependent]]) {
       if (moduleToPackageInfo[id] == null) {
-        let info = getPackage(path.dirname(id));
-        if (info == null && id.startsWith('/')) {
-          id = path.join(rootPackagePath, id.substr(1));
-          info = getPackage(path.dirname(id));
-        }
-        if (info != null && info.path !== rootPackagePath) {
-          moduleToPackageInfo[id] = info;
+        moduleToPackageInfo[id] = id.startsWith('/')
+          ? getPackage(path.dirname(id))
+          : { pkg: { name: id }, path: id };
+        if (moduleToPackageInfo[id] == null) {
+          moduleToPackageInfo[id] = rootPackage;
         }
       }
     }
@@ -167,13 +201,13 @@ const getPackagePathToModules = moduleToPackageInfo => {
 
 const writeHtmlReport = (modules, filePath) => {
   // TODO Detect entry
-  const { path: rootPackagePath } = getPackage(process.cwd());
+  const rootPackage = getPackage(process.cwd());
   const { dependencies, sizes } = getDependenciesAndSizes(modules);
-  const moduleToPackageInfo = getModuleToPackageInfo(dependencies, rootPackagePath);
+  const moduleToPackageInfo = getModuleToPackageInfo(dependencies, rootPackage);
   const packagePathToModules = getPackagePathToModules(moduleToPackageInfo);
-  const rootModuleIds = Object.keys(dependencies)
-    .filter(id => !Object.values(dependencies).some(deps => deps.includes(id)));
-  const data = buildPackageNode('root', rootModuleIds, {
+  const rootModuleId = Object.keys(dependencies)
+    .find(id => !Object.values(dependencies).some(deps => deps.includes(id)));
+  const data = buildPackageNode(rootPackage, [rootModuleId], {
     dependencies,
     sizes,
     moduleToPackageInfo,
