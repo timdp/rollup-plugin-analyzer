@@ -143,7 +143,7 @@ const buildPackageNode = (dependentPkg, moduleIds, ctx, ancestors = []) => {
         ? path.relative(moduleToPackageInfo[id].path, realId)
         : realId;
       return {
-        name: name !== '' ? name : '(empty)',
+        name: name !== '' ? name : '?',
         value: size,
         path: realId
       }
